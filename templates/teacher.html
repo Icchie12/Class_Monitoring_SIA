@@ -1,0 +1,229 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Online Class Monitor - Teacher</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="https://cdn.socket.io/4.8.1/socket.io.min.js"></script>
+</head>
+<body>
+<div class="container">
+  <h1>Online Class Monitor</h1>
+
+  <section class="card">
+    <h2>1. Connect Teacher Google Account</h2>
+    <p id="googleStatus">Checking Google connection...</p>
+    <button id="googleBtn" onclick="connectGoogle()">Connect Google Account</button>
+    <small>This gives the prototype permission to read Google Meet participant records for meetings the authorized account can access.</small>
+  </section>
+
+  <section class="card">
+    <h2>2. Create Class Session</h2>
+    <input id="className" placeholder="Class name e.g. BSIT 3-1">
+    <input id="teacherEmail" placeholder="Teacher email">
+    <input id="meetingUrl" placeholder="Google Meet URL e.g. https://meet.google.com/abc-defg-hij">
+    <button id="startBtn" onclick="createSession()" disabled>Start Monitoring</button>
+    <span id="sessionInfo"></span>
+    <p class="hint">The Meet URL must be the same meeting currently used by the class.</p>
+  </section>
+
+  <section class="card" id="dashboard" hidden>
+    <div class="row">
+      <div>
+        <h2 id="classTitle"></h2>
+        <p id="syncStatus" class="hint">Waiting for Google Meet participants...</p>
+      </div>
+      <div>
+        <button onclick="syncNow()">Sync Participants</button>
+        <button onclick="downloadReport()">Download Excel</button>
+        <button class="danger" onclick="endSession()">End Class & Email Report</button>
+      </div>
+    </div>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Student</th><th>Status</th><th>Time In</th><th>Time Out</th>
+          <th>Tab Changes</th><th>Camera</th><th>Mic</th><th>Chat</th>
+          <th>Last Activity</th>
+        </tr>
+      </thead>
+      <tbody id="studentRows"></tbody>
+    </table>
+
+    <h2>Activity Timeline</h2>
+    <select id="studentSelect" onchange="loadEvents()"></select>
+    <div id="events"></div>
+  </section>
+</div>
+
+<script>
+let sessionId = null;
+let students = {};
+const socket = io();
+
+async function checkGoogle() {
+  const r = await fetch('/api/google/status');
+  const data = await r.json();
+  const status = document.getElementById('googleStatus');
+  const btn = document.getElementById('googleBtn');
+  const start = document.getElementById('startBtn');
+  if (!data.configured) {
+    status.textContent = 'Google OAuth is not configured yet. Put credentials.json in the project folder.';
+    btn.textContent = 'Google Cloud Setup Required';
+    btn.disabled = true;
+    start.disabled = true;
+    return;
+  }
+  if (data.connected) {
+    status.innerHTML = '🟢 Google account connected. Meet participant monitoring is ready.';
+    btn.textContent = 'Reconnect Google Account';
+    start.disabled = false;
+  } else {
+    status.textContent = '🔴 Google account not connected.';
+    btn.textContent = 'Connect Google Account';
+    start.disabled = true;
+  }
+}
+
+function connectGoogle() {
+  window.location.href = '/auth/google';
+}
+
+async function createSession() {
+  const r = await fetch('/api/session', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({
+      class_name: document.getElementById('className').value,
+      teacher_email: document.getElementById('teacherEmail').value,
+      meeting_url: document.getElementById('meetingUrl').value
+    })
+  });
+  const data = await r.json();
+  if (!r.ok || data.error) return alert(data.error || 'Could not create session.');
+  sessionId = data.session_id;
+  document.getElementById('sessionInfo').textContent = ' Session #' + sessionId;
+  document.getElementById('dashboard').hidden = false;
+  updateSyncText(data.sync);
+  await refresh();
+  startPolling();
+}
+
+function updateSyncText(sync) {
+  const el = document.getElementById('syncStatus');
+  if (!sync) return;
+  if (sync.error) el.textContent = '⚠ ' + sync.error;
+  else if (!sync.found) el.textContent = 'Waiting for an active Google Meet conference...';
+  else el.textContent = '🟢 Google Meet synced — ' + sync.participants + ' active participant(s) detected.';
+}
+
+async function syncNow() {
+  if (!sessionId) return;
+  const r = await fetch(`/api/session/${sessionId}/sync`, {method:'POST'});
+  const data = await r.json();
+  updateSyncText(data);
+  await refresh();
+}
+
+async function refresh() {
+  if (!sessionId) return;
+  const r = await fetch('/api/session/' + sessionId);
+  const data = await r.json();
+  if (data.error) return;
+  document.getElementById('classTitle').textContent =
+    data.session.class_name + ' — Session #' + sessionId;
+  students = {};
+  data.students.forEach(s => students[s.id] = s);
+  renderStudents();
+  renderStudentSelect();
+}
+
+function startPolling() {
+  setInterval(async () => {
+    if (!sessionId) return;
+    const r = await fetch(`/api/session/${sessionId}/sync`, {method:'POST'});
+    const data = await r.json();
+    updateSyncText(data);
+    await refresh();
+  }, 5000);
+}
+
+function renderStudents() {
+  const body = document.getElementById('studentRows');
+  body.innerHTML = '';
+  const list = Object.values(students).sort((a,b)=>a.student_name.localeCompare(b.student_name));
+  if (!list.length) {
+    body.innerHTML = '<tr><td colspan="9" class="empty">No Google Meet participants detected yet.</td></tr>';
+    return;
+  }
+  list.forEach(s=>{
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${esc(s.student_name)}</td>
+      <td><span class="status ${s.status}">${s.status}</span></td>
+      <td>${fmt(s.time_in)}</td>
+      <td>${fmt(s.time_out)}</td>
+      <td>${s.tab_changes}</td>
+      <td>${s.camera_events}</td>
+      <td>${s.microphone_events}</td>
+      <td>${s.chat_events}</td>
+      <td>${fmt(s.last_activity)}</td>`;
+    body.appendChild(tr);
+  });
+}
+
+function renderStudentSelect() {
+  const select = document.getElementById('studentSelect');
+  const old = select.value;
+  select.innerHTML = '';
+  Object.values(students).sort((a,b)=>a.student_name.localeCompare(b.student_name)).forEach(s=>{
+    const o = document.createElement('option');
+    o.value = s.id; o.textContent = s.student_name; select.appendChild(o);
+  });
+  if (old && students[old]) select.value = old;
+  loadEvents();
+}
+
+async function loadEvents() {
+  const id = document.getElementById('studentSelect').value;
+  if (!id) { document.getElementById('events').innerHTML=''; return; }
+  const r = await fetch(`/api/session/${sessionId}/events/${id}`);
+  const events = await r.json();
+  document.getElementById('events').innerHTML = events.map(e =>
+    `<div class="event"><b>${esc(e.event_type)}</b> — ${fmt(e.event_time)}<br>${esc(e.details||'')}</div>`
+  ).join('');
+}
+
+function downloadReport() { window.location = `/api/session/${sessionId}/report`; }
+
+async function endSession() {
+  if (!confirm('End the class and generate/email the report?')) return;
+  const r = await fetch(`/api/session/${sessionId}/end`, {method:'POST'});
+  const data = await r.json();
+  if (data.email_sent) {
+    alert('Class ended. Excel report was generated and emailed to the teacher email address.');
+  } else {
+    alert('Class ended and the Excel report was generated, but the email could not be sent. Check the PowerShell error message.');
+  }
+}
+
+socket.on('student_update', s => {
+  if (!sessionId || s.class_name && students[s.id] === undefined && s.session_id != sessionId) return;
+  if (s.class_name) students[s.id] = s;
+  renderStudents(); renderStudentSelect();
+});
+socket.on('participants_sync', data => { if (data.session_id === sessionId) refresh(); });
+socket.on('session_ended', data => { if (data.session_id === sessionId) refresh(); });
+
+function fmt(value) {
+  if (!value) return '-';
+  try { return new Date(value).toLocaleTimeString(); } catch(e) { return value; }
+}
+function esc(x) {
+  return String(x).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));
+}
+
+checkGoogle();
+</script>
+</body>
+</html>

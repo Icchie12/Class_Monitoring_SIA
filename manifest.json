@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "Online Class Monitor",
+  "version": "3.0.0",
+  "description": "School prototype for Google Meet attendance and browser activity monitoring.",
+  "permissions": ["tabs", "storage"],
+  "host_permissions": [
+    "http://127.0.0.1:5000/*",
+    "http://localhost:5000/*",
+    "https://meet.google.com/*"
+  ],
+  "background": {"service_worker": "background.js"},
+  "content_scripts": [
+    {
+      "matches": [
+        "https://meet.google.com/*",
+        "http://127.0.0.1:5000/student*",
+        "http://localhost:5000/student*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {"default_title": "Online Class Monitor"}
+}
